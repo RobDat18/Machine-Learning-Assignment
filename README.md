@@ -8,3 +8,4 @@ You are therefore kindly requested to review the compiled version on the [RPubs 
 (RPubs was previously used during this Data Science specialization to share assignment results, so it seems a reasonable alternative)  
 Your understanding for my clumsiness and cooperation is very much appreciated.  
 
+
