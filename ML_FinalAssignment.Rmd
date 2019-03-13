@@ -1,0 +1,201 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+## Qualitive Activity Recognition of Weight Lifting Exercises
+### Johns Hopkins University - Coursera Practical Machine Learning course 
+#### Final assignment by RobDat18, March 2019
+
+### Abstract
+The weight-lifting data graciously provided by the [Human Activity Recognition website](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har) are used to develop a prediction model for five different weight-lifting classifications. The model which is based on a random forest technique, features a 0.997 prediction accuracy.
+
+### The Assignment Goal
+Six participants were asked to perform dumbell lifts correctly and incorrectly in 5 different ways:  
+- Class A: exactly according to the specification,  
+- Class B: throwing the elbows to the front,  
+- Class C: lifting the dumbbell only halfway,  
+- Class D: lowering the dumbbell only halfway and    
+- Class E: throwing the hips to the front.  
+
+The goal of this assignment is to predict the manner in which these participants did the exercises. All variables in the *pml-training* data set may be used to do so. The final prediction model shall be used to predict 20 different test cases in the *pml-testing* data set.
+
+### Raw Data downoading and cleaning
+```{r, cache=TRUE}
+file1 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file (file1, destfile = "pml-training.csv")
+file2<- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file (file2, destfile = "pml-testing.csv")
+
+PMLtraining <- as.data.frame(read.csv("pml-training.csv", header=TRUE, sep=",", quote=""))
+PMLtesting <- as.data.frame(read.csv("pml-testing.csv", header=TRUE, sep=",", quote=""))
+
+colnames(PMLtraining) <- gsub("[X\\..]","",colnames(PMLtraining))
+colnames(PMLtraining)[1] <- "index"
+colnames(PMLtesting) <- gsub("[X\\..]","",colnames(PMLtesting))
+colnames(PMLtesting)[1] <- "index"
+
+```
+The PMLtraining data set contains 160 columns and 19622 rows, its last column 'classe' being the to-be-predicted outcome variable. The corresponding PMLtesting data features the same columns save the last one: the *classe* variable is missing, making this a *blind test* data set. It has only 20 rows (observations).
+```{r, results="hide", echo=FALSE, message=FALSE}
+library(caret)
+library(stringr)
+library(lubridate)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(parallel)
+library(doParallel)
+```
+
+```{r }
+dim(PMLtraining)
+dim(PMLtesting)
+```
+A summary of the PMLtesting data reveals many columns containing just missing values (NA).
+```{r, results="hide"}
+summary(PMLtesting) # the output is hidden
+```
+It makes no sense to develop a prediction model based on variables / predictors which are missing in this testing data set.  Therefore, these variables are removed from the model building (training) data set. Also, many other PMLtesting columns contain "" as a single, unique value, for all 20 rows. Checking their counterparts in the PMLtraining set shows that most of these column-values (>97%) are the same. The remaining values often include the "#Dev/0!" text string. It is therefore decided that all PMLtesting columns having a single unique value, NAs or "", are to be removed from both data sets.
+```{r }
+# Data cleaning, creating the 'BaseData' and 'BlindTest' data sets.
+#====================================================================================================
+
+# Cleaning the values of the index variable / column. 
+PMLtraining$index <- str_trim(PMLtraining$index)          # stripping the index variable
+PMLtraining$index <- gsub("[\\]","", PMLtraining$index)   # removing the \
+PMLtraining$index <- gsub("[\"]","", PMLtraining$index)   # and the "-s
+PMLtraining$index <- as.integer(PMLtraining$index)        # character to integer
+
+PMLtesting$index <- str_trim(PMLtesting$index)          # stripping the index variable
+PMLtesting$index <- gsub("[\\]","", PMLtesting$index)   # removing the \
+PMLtesting$index <- gsub("[\"]","", PMLtesting$index)   # and the "-s
+PMLtesting$index <- as.integer(PMLtesting$index)        # character to integer
+
+# Selecting the columns in the 'PMLtesting' data set with just 1 unique value, incl. NAs.
+# Removing these columns from both data sets.
+
+w <- dim(PMLtesting)[2]         # The no.of columns of the 'PMLtesting' data set.
+u <- rep(0, w)                  # Vector u with dummy values equal to zero.
+
+for(i in 1: w){
+    if(length(unique(PMLtesting[,i]))==1){
+        u[i]<-i                 # PMLtesting columns with just 1 unique value: the column number 
+    }                           # is set in u at its corresponding column position.
+}
+
+BlindTest <- PMLtesting[,-u]  # Removing all 'PMLtesting' data set columns with just 1 unique value.
+BaseData <- PMLtraining[,-u]  # Removing the same columns from 'PMLtraining' data set.
+
+# Cleaning and converting the cvtd_timestamp variable into a date&time format.
+BaseData$cvtd_timestamp <- gsub("[\"]","", BaseData$cvtd_timestamp) # removing "-s.
+BaseData$cvtd_timestamp <- dmy_hm (BaseData$cvtd_timestamp)
+BaseData$cvtd_timestamp <- as.POSIXct(BaseData$cvtd_timestamp)
+
+BlindTest$cvtd_timestamp <- gsub("[\"]","", BlindTest$cvtd_timestamp) # removing "-s.
+BlindTest$cvtd_timestamp <- dmy_hm (BlindTest$cvtd_timestamp)
+BlindTest$cvtd_timestamp <- as.POSIXct(BlindTest$cvtd_timestamp)
+
+BaseData$user_name <- gsub("[\"]","",BaseData$user_name)      # Removing the superfluous ""
+BaseData$user_name <- as.factor(BaseData$user_name) # Renewed factorization of the 'user_name'.
+BlindTest$user_name <- gsub("[\"]","",BlindTest$user_name)    # Removing the superfluous ""
+BlindTest$user_name <- as.factor(BlindTest$user_name) # Renewed factorization of the 'user_name' 
+
+BaseData$classe <- gsub("[\"]","", BaseData$classe) # Removing the superfluous "" in the outcome
+                                                    # variable (classe)values.
+BaseData$classe <- as.factor(BaseData$classe)       # Renewed factorization of the 'classe' outcomes.
+```
+The resulting BaseData set is the slimmed-down version of the PMLtraining data set, containing 59 columns including the *classe* outcome variable. So 58 potential regressors remain. Column 2 (user_name) is a *factor* variable, column 5 (cvtd_timestamp) is *POSIXct*. All others are either *integer* or *numeric*.  
+This concludes the downloading and data cleaning of the model building data set.
+```{r }
+str(BaseData)
+```
+### Splitting the Data
+The BaseData set is relatively large and a prediction-model based on a combination of prediction-methods is not to be precluded beforehand. Therefore, a validation set is introduced. In accordance with Jeff Leek's guidelines for modeling large data sets, the BaseData observations (rows) are split into 60% training, 20% test and 20% validation.
+```{r }
+set.seed(1000)
+inBuild <- createDataPartition (y=BaseData$classe, p=0.8, list=FALSE)
+validation <- BaseData[-inBuild, ]
+buildData <- BaseData[inBuild, ]
+inTrain <- createDataPartition (y=buildData$classe, p=0.75, list=FALSE)
+training <- buildData[inTrain, ]
+testing <- buildData[-inTrain, ]
+```
+### Exploratory Data Analysis
+The training data set is used for an exploratory analysis. This analysis quick-scans the potential regressors to understand if any data preprocessing is required and to establish potentially promissing modeling techniques. The *index* variable turns out to be a sequential categorization of the *classe*-based measurements.  The three *timestamp* variables do indeed contain just timestamp data. These four variables will therefore be excluded as predictors in the regression model. A scan for near-zero variance predictors does not reveal any candidates for exclusion:
+```{r }
+nsv <- nearZeroVar (BaseData, saveMetrics=TRUE)
+nsv
+```
+
+
+```{r , results="hide", echo=FALSE, message=FALSE, fig.height = 4, fig.width = 10, fig.align = "left"}
+x <- 6
+f1 <- qplot(training[,x], bins=100, data=training, main=paste0("Fig. 1, x = nr. ",x," ",colnames(training[x])))
+
+y <- 26
+f2 <- qplot(training[,y], bins=100, data=training, main=paste0("Fig. 2, x = nr. ",y," ",colnames(training[y])))
+
+grid.arrange (f1, f2, ncol=2)
+```
+- Fig. 1 shows the values distribution of the *num_window* variable, a bit of a mysterious variable amongst all other physical-movement related ones. It is noted that the corresponding values in the BlindTest data set reveal an almost identical distribution to that of the BaseData set. Codebook info is lacking to judge this variable, so it's left in the data set.    
+- Fig. 2 shows a typical value distribution for one of the physical movement-related variables. Most others show similar distributions.
+
+```{r, results="hide", echo=FALSE, message=FALSE, fig.height = 4, fig.width = 10}
+x <- 26
+g <- ggplot(training, aes(user_name, training[,x], color=classe))
+g <- g + geom_boxplot() + labs(title=paste0("Fig. 3, y-axis: nr. ",x," ",colnames(training[x])))
+f5 <- g
+
+w <- 7
+y <- 8
+z <- training[training$user_name=="charles", ]
+g <- ggplot(z, aes(z[,w], z[,y], color=classe))
+g <- g + geom_point() + labs(title=paste0("Fig. 4: ","x= ",w, ".",colnames(z[w]), " \\ ", 
+                                          "y= ",y, ".",colnames(z[y]), " \\ ",
+                                          "participant=", "charles"))
+f6 <- g
+
+grid.arrange (f5, f6, ncol=2)
+```
+- Fig. 3 illustrates not only the noisiness of the data but also the fact that the measurement outcomes may be very participant-specific.  
+- Fig. 4 shows how a combination of variables for a specific participant (*user_name*=charles), may provide for unambiguous classifications of the activities.  
+
+The last two figures show data-noisiness with presumably weak predictors and  participant-specific measurements. This suggests a booster prediction modeling technique, to boost the weak predictors, in combination with a classification tree-based model seperating the six participants.  
+
+### Prediction Modeling
+The target accuray shall be such that the total number of 20 BlindTest (PMLtesting) cases, are predicted with an overall accuracy of at least 80%. 
+This requires a model accuray of at least 98.9%: (0.989)^20 = 0.800  
+
+A random forest model is investigated using the `train` function of the `caret` library. [Course mentor info](https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md) provides valuable advise regarding the use of parallel computing and function parameter settings to avoid excessive elapsed times.  
+The parameters are set using the `trainControl` function. The most critical arguments for the trainControl function are the resampling method `method`, the `number` that specifies the quantity of folds for k-fold cross-validation, and `allowParallel` which tells caret to use the specified number of clusters. A 5 k-fold cross-validation model is advised.  
+
+The random forest model is run and the confusionMatrix compares the *testing* dataframe *classe* values with the model's predictions.  
+
+```{r, cache=TRUE}
+set.seed(1000)
+
+mTrain <- select(training, -(index), -(raw_timestamp_part_1:cvtd_timestamp)) 
+# Excluding the index and timestamp variables.
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+fitControl <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+# 'method' and 'number' per Course mentor advise.
+
+system.time(
+modFit_rf <- train(classe ~ . , method="rf", trControl=fitControl, data=mTrain, verbose=FALSE)
+)
+stopCluster(cluster)    # Shuting down the clustering. 
+registerDoSEQ()         # Forcing R to return to single threaded processing.
+
+predFit_rf <- predict(modFit_rf, testing)
+confusionMatrix(testing$classe, predFit_rf)
+```
+
+**Conclusion**
+The random forest model's out of sample accuracy equals 0.997. This exceeds the required 0.989 level. This model is therefore not only the first, but also the final one.  
+The model happens to predict all 20 BlindTest cases correctly (ref. the week 4 quiz outcomes).  
+
+-/-
+
